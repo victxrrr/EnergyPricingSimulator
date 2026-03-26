@@ -1,12 +1,27 @@
 import os
 import pandas as pd
 import numpy as np
+from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 import mplcyberpunk
 from dotenv import load_dotenv
 from entsoe import EntsoePandasClient
 
 plt.style.use("cyberpunk")
+
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.size": 16,
+    "font.family": "Libertinus Serif",
+    # "legend.loc": "best",
+    # "image.cmap": "hsv",
+    # "grid.linewidth": 0.5,
+    # "grid.color": "gray",
+    # "figure.titlesize": "large",
+    # "figure.titleweight": "bold",
+    # "figure.dpi": 125,
+    "figure.figsize": (10, 5)
+})
 
 DATES_COL = "MTU"
 PRICES_COL = "Prices [EUR / MWh]"
@@ -19,7 +34,7 @@ class StochasticProcess:
         self.dt = dt
         self.trajectories = None
 
-    def plot(self, n_hist=100, n_traj=10):
+    def plot(self, n_hist=100, mean=False):
 
         hist = self.prices.iloc[-n_hist:]
         hist.plot()
@@ -31,9 +46,13 @@ class StochasticProcess:
             freq="h"
         )[1:]
 
-        for i in range(min(n_traj, self.trajectories.shape[0])):
-            traj = pd.Series(data=self.trajectories[i], index=future_dates)
-            traj.plot(alpha=.4, lw=1)
+        if not mean:
+            for i in range(self.trajectories.shape[0]):
+                traj = pd.Series(data=self.trajectories[i], index=future_dates)
+                traj.plot(alpha=.4, lw=1)
+        else:
+            traj = pd.Series(data=self.trajectories.mean(axis=0), index=future_dates)
+            traj.plot()
 
         plt.show()
 
@@ -94,7 +113,7 @@ class OrnsteinUhlenbeck(StochasticProcess):
         self.mu = 0.
         self.sigma = 0.
 
-    def fit(self, winsorize=False, alpha=0.01):
+    def fit(self, winsorize=False, alpha=0.01, seasonal=True, show=True):
 
         X = self.prices.iloc[:-1].to_numpy().flatten()
         Y = self.prices.iloc[1:].to_numpy().flatten() - X
@@ -102,7 +121,12 @@ class OrnsteinUhlenbeck(StochasticProcess):
         # OLS regression
         b, a = np.polyfit(X, Y, 1)
         self.kappa = -b / self.dt
-        self.mu = a / (self.kappa * self.dt)
+        if not seasonal:
+            self.mu = a / (self.kappa * self.dt)
+            self.__seasonal = False
+        else:
+            self.__opt_seasonal_mu(show=show)
+            self.__seasonal = True
         residuals = Y - (a + b * X)
 
         if winsorize:
@@ -114,20 +138,33 @@ class OrnsteinUhlenbeck(StochasticProcess):
         else:
             self.sigma = np.std(residuals) / np.sqrt(self.dt)
         
-        print(
-            ">>> INFO: Ornstein-Uhlenbeck parameters\n",
-            f"         kappa: {self.kappa:.3f} mu: {self.mu:.3f} sigma: {self.sigma:.3f}"
-        )
+        if not self.__seasonal:
+            print(
+                ">>> INFO: Ornstein-Uhlenbeck parameters\n",
+                f"         kappa: {self.kappa:.3f} mu: {self.mu:.3f} sigma: {self.sigma:.3f}"
+            )
+        else:
+            print(
+                ">>> INFO: Ornstein-Uhlenbeck parameters\n",
+                f"         kappa: {self.kappa:.3f}\n",
+                f"         mu(t): {self.__mu0:.2f} + {self.__A:.2f} * cos(2*pi*t/T + {self.__phi:.2f})\n",
+                f"         sigma: {self.sigma:.3f}"
+            )
 
     def simulate(self, N, steps):
         
         self.S0 = self.prices.tail(1).values[0]
         self.trajectories = np.zeros((N, steps))
 
-        self.trajectories[:, 0] = self.S0 + self.kappa * (self.mu - self.S0) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
-        for i in range(1, steps):
-            self.trajectories[:, i] = self.trajectories[:, i-1] + self.kappa * (self.mu - self.trajectories[:, i-1]) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
-
+        if not self.__seasonal:
+            self.trajectories[:, 0] = self.S0 + self.kappa * (self.mu - self.S0) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
+            for i in range(1, steps):
+                self.trajectories[:, i] = self.trajectories[:, i-1] + self.kappa * (self.mu - self.trajectories[:, i-1]) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
+        else:
+            self.trajectories[:, 0] = self.S0 + self.kappa * (self.mu(0) - self.S0) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
+            for i in range(1, steps):
+                self.trajectories[:, i] = self.trajectories[:, i-1] + self.kappa * (self.mu(i) - self.trajectories[:, i-1]) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn(N)
+            
     def pricing_forward(self, T):
         return self.mu + (self.S0 - self.mu)*np.exp(-self.kappa*T)
 
@@ -139,6 +176,32 @@ class OrnsteinUhlenbeck(StochasticProcess):
 
         CI = (mean - 1.96 * std/sqrt_N, mean + 1.96 * std/sqrt_N)
         return mean, CI
+
+    def __seasonal_mu(self, t, mu0, A, phi):
+        return mu0 + A * np.cos(2 * np.pi * t / 12 + phi)
+
+    def __opt_seasonal_mu(self, show=True):
+        seasons = data.groupby(data.index.month).mean()
+        seasons.index -= 1
+        xdata = np.arange(start=0, stop=12)
+        ydata = seasons.values.flatten()
+        popt, pcov = curve_fit(self.__seasonal_mu, xdata, ydata)
+        self.__mu0 = popt[0]
+        self.__A = popt[1]
+        self.__phi = popt[2]
+
+        start_date = pd.Timestamp(data.index[-1])
+        # approximate offset wrt initial date 
+        offset = (start_date.month - 1 + (start_date.day + start_date.hour/24) / (365/12))/12
+        self.mu = lambda t : self.__mu0 + self.__A * np.cos(2 * np.pi * (t * dt + offset) + self.__phi)
+        
+        if show:
+            seasons.plot()
+            xspace = np.linspace(0, 11)
+            plt.plot(xspace, self.__seasonal_mu(xspace, popt[0], popt[1], popt[2]))
+            plt.xticks(xdata, ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"])
+            plt.show()
+        
 
 if __name__ == "__main__":
 
@@ -169,10 +232,10 @@ if __name__ == "__main__":
     # plt.show()
 
     dt = 1/8760
-    T = int(1/dt * 0.1)
-    N = 1
+    T = int(1/dt * 1)
+    N = 1000
     OU = OrnsteinUhlenbeck(data, dt)
 
-    OU.fit(winsorize=True, alpha=0.05)
+    OU.fit(winsorize=True, alpha=0.05, seasonal=True)
     OU.simulate(N, T)
-    OU.plot(n_hist=800)
+    OU.plot(n_hist=800, mean=True)
