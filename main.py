@@ -11,8 +11,8 @@ plt.style.use("cyberpunk")
 
 plt.rcParams.update({
     "text.usetex": True,
-    "font.size": 16,
-    "font.family": "Libertinus Serif",
+    "font.size": 20,
+    "font.family": "serif",
     # "legend.loc": "best",
     # "image.cmap": "hsv",
     # "grid.linewidth": 0.5,
@@ -20,7 +20,7 @@ plt.rcParams.update({
     # "figure.titlesize": "large",
     # "figure.titleweight": "bold",
     # "figure.dpi": 125,
-    "figure.figsize": (10, 5)
+    "figure.figsize": (10, 8.5)
 })
 
 DATES_COL = "MTU"
@@ -35,7 +35,7 @@ class StochasticProcess:
         self.dt = dt
         self.trajectories = None
 
-    def plot(self, n_hist=100, mean=False):
+    def plot(self, n_hist=100, mean=False, linkedin=False):
         """ Plot the historical data and the simulated trajectories. """
 
         hist = self.prices.iloc[-n_hist:]
@@ -56,6 +56,24 @@ class StochasticProcess:
             traj = pd.Series(data=self.trajectories.mean(axis=0), index=future_dates)
             traj.plot()
 
+        plt.gca().get_legend().remove()
+        plt.xlabel("")
+        plt.legend(["Day-Ahead Price [EUR / MWh]"], loc="best")
+        plt.tight_layout()
+
+        if linkedin:
+            avg_start_y = self.trajectories.max()
+            label_date = last_date + pd.Timedelta(hours=12)
+            plt.text(label_date, avg_start_y + 5, 
+                    r"$\overbrace{\qquad \qquad \qquad \qquad}^{\emph{predictions}}$", 
+                    fontsize=24, 
+                    color='white', 
+                    alpha=0.8,
+                    fontstyle='italic',
+                    horizontalalignment='left')
+
+        mplcyberpunk.make_lines_glow()
+        plt.savefig("ou_simulation.svg", format="svg")
         plt.show()
 
 class GeometricBrownianMotion(StochasticProcess):
@@ -289,12 +307,12 @@ if __name__ == "__main__":
     # plt.show()
 
     dt = 1/8760
-    T = int(1/dt * 1)
-    N = 1000
+    T = 3 * 24
+    N = 3
     OU = OrnsteinUhlenbeck(data, dt)
 
-    # OU.fit(winsorize=True, alpha=0.05, seasonal=True)
-    # OU.simulate(N, T)
-    # OU.plot(n_hist=800, mean=True)
+    OU.fit(winsorize=True, alpha=0.05, seasonal=True, show=False)
+    OU.simulate(N, T)
+    OU.plot(n_hist=24*5, mean=False, linkedin=True)
     
-    OU.backtest_rolling(train_weeks=52, test_days=7)
+    # OU.backtest_rolling(train_weeks=52, test_days=7)
